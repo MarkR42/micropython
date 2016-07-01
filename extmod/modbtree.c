@@ -44,7 +44,12 @@ typedef struct _mp_obj_btree_t {
     mp_obj_t end_key;
     #define FLAG_END_KEY_INCL 1
     #define FLAG_DESC 2
+    #define FLAG_ITER_TYPE_MASK 0xc0
+    #define FLAG_ITER_KEYS   0x40
+    #define FLAG_ITER_VALUES 0x80
+    #define FLAG_ITER_ITEMS  0xc0
     byte flags;
+    byte next_flags;
 } mp_obj_btree_t;
 
 STATIC const mp_obj_type_t btree_type;
@@ -62,9 +67,9 @@ STATIC mp_obj_btree_t *btree_new(DB *db) {
     mp_obj_btree_t *o = m_new_obj(mp_obj_btree_t);
     o->base.type = &btree_type;
     o->db = db;
-    o->start_key = MP_OBJ_NULL;
-    o->end_key = MP_OBJ_NULL;
-    o->flags = 0;
+    o->start_key = mp_const_none;
+    o->end_key = mp_const_none;
+    o->next_flags = 0;
     return o;
 }
 
@@ -126,17 +131,54 @@ STATIC mp_obj_t btree_seq(size_t n_args, const mp_obj_t *args) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(btree_seq_obj, 2, 4, btree_seq);
 
-STATIC mp_obj_t btree_range(size_t n_args, const mp_obj_t *args) {
+STATIC mp_obj_t btree_init_iter(size_t n_args, const mp_obj_t *args, byte type) {
     mp_obj_btree_t *self = MP_OBJ_TO_PTR(args[0]);
-    self->start_key = args[1];
-    self->end_key = args[2];
-    self->flags = 0;
-    if (n_args > 3) {
-        self->flags = MP_OBJ_SMALL_INT_VALUE(args[3]);
+    self->next_flags = type;
+    self->start_key = mp_const_none;
+    self->end_key = mp_const_none;
+    if (n_args > 1) {
+        self->start_key = args[1];
+        if (n_args > 2) {
+            self->end_key = args[2];
+            if (n_args > 3) {
+                self->next_flags = type | MP_OBJ_SMALL_INT_VALUE(args[3]);
+            }
+        }
     }
     return args[0];
 }
-STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(btree_range_obj, 3, 4, btree_range);
+
+STATIC mp_obj_t btree_keys(size_t n_args, const mp_obj_t *args) {
+    return btree_init_iter(n_args, args, FLAG_ITER_KEYS);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(btree_keys_obj, 1, 4, btree_keys);
+
+STATIC mp_obj_t btree_values(size_t n_args, const mp_obj_t *args) {
+    return btree_init_iter(n_args, args, FLAG_ITER_VALUES);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(btree_values_obj, 1, 4, btree_values);
+
+STATIC mp_obj_t btree_items(size_t n_args, const mp_obj_t *args) {
+    return btree_init_iter(n_args, args, FLAG_ITER_ITEMS);
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(btree_items_obj, 1, 4, btree_items);
+
+STATIC mp_obj_t btree_getiter(mp_obj_t self_in) {
+    mp_obj_btree_t *self = MP_OBJ_TO_PTR(self_in);
+    if (self->next_flags != 0) {
+        // If we're called immediately after keys(), values(), or items(),
+        // use their setup for iteration.
+        self->flags = self->next_flags;
+        self->next_flags = 0;
+    } else {
+        // Otherwise, iterate over all keys.
+        self->flags = FLAG_ITER_KEYS;
+        self->start_key = mp_const_none;
+        self->end_key = mp_const_none;
+    }
+
+    return self_in;
+}
 
 STATIC mp_obj_t btree_iternext(mp_obj_t self_in) {
     mp_obj_btree_t *self = MP_OBJ_TO_PTR(self_in);
@@ -179,10 +221,18 @@ STATIC mp_obj_t btree_iternext(mp_obj_t self_in) {
         }
     }
 
-    mp_obj_tuple_t *pair = mp_obj_new_tuple(2, NULL);
-    pair->items[0] = mp_obj_new_bytes(key.data, key.size);
-    pair->items[1] = mp_obj_new_bytes(val.data, val.size);
-    return pair;
+    switch (self->flags & FLAG_ITER_TYPE_MASK) {
+        case FLAG_ITER_KEYS:
+            return mp_obj_new_bytes(key.data, key.size);
+        case FLAG_ITER_VALUES:
+            return mp_obj_new_bytes(val.data, val.size);
+        default: {
+            mp_obj_tuple_t *pair = mp_obj_new_tuple(2, NULL);
+            pair->items[0] = mp_obj_new_bytes(key.data, key.size);
+            pair->items[1] = mp_obj_new_bytes(val.data, val.size);
+            return pair;
+        }
+    }
 }
 
 STATIC mp_obj_t btree_subscr(mp_obj_t self_in, mp_obj_t index, mp_obj_t value) {
@@ -223,7 +273,9 @@ STATIC const mp_rom_map_elem_t btree_locals_dict_table[] = {
     { MP_ROM_QSTR(MP_QSTR_get), MP_ROM_PTR(&btree_get_obj) },
     { MP_ROM_QSTR(MP_QSTR_put), MP_ROM_PTR(&btree_put_obj) },
     { MP_ROM_QSTR(MP_QSTR_seq), MP_ROM_PTR(&btree_seq_obj) },
-    { MP_ROM_QSTR(MP_QSTR_items), MP_ROM_PTR(&btree_range_obj) },
+    { MP_ROM_QSTR(MP_QSTR_keys), MP_ROM_PTR(&btree_keys_obj) },
+    { MP_ROM_QSTR(MP_QSTR_values), MP_ROM_PTR(&btree_values_obj) },
+    { MP_ROM_QSTR(MP_QSTR_items), MP_ROM_PTR(&btree_items_obj) },
 };
 
 STATIC MP_DEFINE_CONST_DICT(btree_locals_dict, btree_locals_dict_table);
@@ -233,7 +285,7 @@ STATIC const mp_obj_type_t btree_type = {
     // Save on qstr's, reuse same as for module
     .name = MP_QSTR_btree,
     .print = btree_print,
-    .getiter = mp_identity,
+    .getiter = btree_getiter,
     .iternext = btree_iternext,
     .subscr = btree_subscr,
     .locals_dict = (void*)&btree_locals_dict,
